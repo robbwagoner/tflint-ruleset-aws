@@ -7,13 +7,15 @@ import (
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	hcl "github.com/hashicorp/hcl/v2"
+	"github.com/terraform-linters/tflint-plugin-sdk/hclext"
 	"github.com/terraform-linters/tflint-plugin-sdk/tflint"
 	"github.com/terraform-linters/tflint-ruleset-aws/aws"
 )
 
 // AwsLaunchConfigurationInvalidImageIDRule checks whether "aws_instance" has invalid AMI ID
 type AwsLaunchConfigurationInvalidImageIDRule struct {
+	tflint.DefaultRule
+
 	resourceType  string
 	attributeName string
 	amiIDs        map[string]bool
@@ -48,15 +50,32 @@ func (r *AwsLaunchConfigurationInvalidImageIDRule) Link() string {
 	return ""
 }
 
+// Metadata returns the metadata about deep checking
+func (r *AwsLaunchConfigurationInvalidImageIDRule) Metadata() interface{} {
+	return map[string]bool{"deep": true}
+}
+
 // Check checks whether "aws_instance" has invalid AMI ID
 func (r *AwsLaunchConfigurationInvalidImageIDRule) Check(rr tflint.Runner) error {
 	runner := rr.(*aws.Runner)
 
-	return runner.WalkResourceAttributes(r.resourceType, r.attributeName, func(attribute *hcl.Attribute) error {
+	resources, err := runner.GetResourceContent(r.resourceType, &hclext.BodySchema{
+		Attributes: []hclext.AttributeSchema{{Name: r.attributeName}},
+	}, nil)
+	if err != nil {
+		return err
+	}
+
+	for _, resource := range resources.Blocks {
+		attribute, exists := resource.Body.Attributes[r.attributeName]
+		if !exists {
+			continue
+		}
+
 		var ami string
 		err := runner.EvaluateExpr(attribute.Expr, &ami, nil)
 
-		return runner.EnsureNoError(err, func() error {
+		err = runner.EnsureNoError(err, func() error {
 			if !r.amiIDs[ami] {
 				log.Printf("[DEBUG] Fetch AMI images: %s", ami)
 				resp, err := runner.AwsClient.EC2.DescribeImages(&ec2.DescribeImagesInput{
@@ -70,10 +89,10 @@ func (r *AwsLaunchConfigurationInvalidImageIDRule) Check(rr tflint.Runner) error
 						case "InvalidAMIID.NotFound":
 							fallthrough
 						case "InvalidAMIID.Unavailable":
-							runner.EmitIssueOnExpr(
+							runner.EmitIssue(
 								r,
 								fmt.Sprintf("\"%s\" is invalid image ID.", ami),
-								attribute.Expr,
+								attribute.Expr.Range(),
 							)
 							return nil
 						}
@@ -93,14 +112,19 @@ func (r *AwsLaunchConfigurationInvalidImageIDRule) Check(rr tflint.Runner) error
 						r.amiIDs[*image.ImageId] = true
 					}
 				} else {
-					runner.EmitIssueOnExpr(
+					runner.EmitIssue(
 						r,
 						fmt.Sprintf("\"%s\" is invalid image ID.", ami),
-						attribute.Expr,
+						attribute.Expr.Range(),
 					)
 				}
 			}
 			return nil
 		})
-	})
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

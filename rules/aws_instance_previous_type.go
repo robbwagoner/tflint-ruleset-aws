@@ -3,13 +3,15 @@ package rules
 import (
 	"fmt"
 
-	hcl "github.com/hashicorp/hcl/v2"
+	"github.com/terraform-linters/tflint-plugin-sdk/hclext"
 	"github.com/terraform-linters/tflint-plugin-sdk/tflint"
 	"github.com/terraform-linters/tflint-ruleset-aws/project"
 )
 
 // AwsInstancePreviousTypeRule checks whether the resource uses previous generation instance type
 type AwsInstancePreviousTypeRule struct {
+	tflint.DefaultRule
+
 	resourceType          string
 	attributeName         string
 	previousInstanceTypes map[string]bool
@@ -82,19 +84,36 @@ func (r *AwsInstancePreviousTypeRule) Link() string {
 
 // Check checks whether the resource's `instance_type` is included in the list of previous generation instance type
 func (r *AwsInstancePreviousTypeRule) Check(runner tflint.Runner) error {
-	return runner.WalkResourceAttributes(r.resourceType, r.attributeName, func(attribute *hcl.Attribute) error {
+	resources, err := runner.GetResourceContent(r.resourceType, &hclext.BodySchema{
+		Attributes: []hclext.AttributeSchema{{Name: r.attributeName}},
+	}, nil)
+	if err != nil {
+		return err
+	}
+
+	for _, resource := range resources.Blocks {
+		attribute, exists := resource.Body.Attributes[r.attributeName]
+		if !exists {
+			continue
+		}
+
 		var instanceType string
 		err := runner.EvaluateExpr(attribute.Expr, &instanceType, nil)
 
-		return runner.EnsureNoError(err, func() error {
+		err = runner.EnsureNoError(err, func() error {
 			if r.previousInstanceTypes[instanceType] {
-				runner.EmitIssueOnExpr(
+				runner.EmitIssue(
 					r,
 					fmt.Sprintf("\"%s\" is previous generation instance type.", instanceType),
-					attribute.Expr,
+					attribute.Expr.Range(),
 				)
 			}
 			return nil
 		})
-	})
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

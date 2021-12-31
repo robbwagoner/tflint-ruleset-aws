@@ -5,14 +5,15 @@ package api
 import (
 	"fmt"
 	"log"
-
-	hcl "github.com/hashicorp/hcl/v2"
+	"github.com/terraform-linters/tflint-plugin-sdk/hclext"
 	"github.com/terraform-linters/tflint-plugin-sdk/tflint"
     "github.com/terraform-linters/tflint-ruleset-aws/aws"
 )
 
 // AwsRouteInvalidNatGatewayRule checks whether attribute value actually exists
 type AwsRouteInvalidNatGatewayRule struct {
+	tflint.DefaultRule
+
 	resourceType  string
 	attributeName string
 	data          map[string]bool
@@ -49,11 +50,30 @@ func (r *AwsRouteInvalidNatGatewayRule) Link() string {
 	return ""
 }
 
+// Metadata returns the metadata about deep checking
+func (r *AwsRouteInvalidNatGatewayRule) Metadata() interface{} {
+	return map[string]bool{"deep": true}
+}
+
 // Check checks whether the attributes are included in the list retrieved by DescribeNatGateways
 func (r *AwsRouteInvalidNatGatewayRule) Check(rr tflint.Runner) error {
     runner := rr.(*aws.Runner)
 
-	return runner.WalkResourceAttributes(r.resourceType, r.attributeName, func(attribute *hcl.Attribute) error {
+	resources, err := runner.GetResourceContent(r.resourceType, &hclext.BodySchema{
+		Attributes: []hclext.AttributeSchema{
+			{Name: r.attributeName},
+		},
+	}, nil)
+	if err != nil {
+		return err
+	}
+
+	for _, resource := range resources.Blocks {
+		attribute, exists := resource.Body.Attributes[r.attributeName]
+		if !exists {
+			continue
+		}
+
 		if !r.dataPrepared {
 			log.Print("[DEBUG] invoking DescribeNatGateways")
 			var err error
@@ -76,13 +96,15 @@ func (r *AwsRouteInvalidNatGatewayRule) Check(rr tflint.Runner) error {
 
 		return runner.EnsureNoError(err, func() error {
 			if !r.data[val] {
-				runner.EmitIssueOnExpr(
+				runner.EmitIssue(
 					r,
 					fmt.Sprintf(`"%s" is invalid NAT gateway ID.`, val),
-					attribute.Expr,
+					attribute.Expr.Range(),
 				)
 			}
 			return nil
 		})
-	})
+	}
+
+	return nil
 }
